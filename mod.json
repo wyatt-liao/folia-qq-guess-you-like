@@ -1,12 +1,12 @@
 {
   "folium": 1,
   "id": "qq-guess-you-like",
-  "name": "QQ音乐猜你喜欢与雷达电台",
-  "version": "1.0.0",
+  "name": "QQ音乐电台推荐增强",
+  "version": "1.0.1",
   "author": "wyatt-liao",
-  "description": "为 QQ 音乐音源接入「猜你喜欢」个性推荐流与 11 款热门雷达电台矩阵，支持 2×2 核心焦点大卡片，自动提取首曲专辑高清封面。",
+  "description": "为 QQ 音乐音源接入「随心听」精选电台流，点按直接播放，自动提取首曲专辑高清封面，卸载时完整还原宿主状态。",
   "client": "client.mjs",
   "preview": "preview.jpg",
   "permissions": ["net.fetch"],
-  "folia": "*"
+  "folia": ">=0.7.17 <0.8.0"
 }
