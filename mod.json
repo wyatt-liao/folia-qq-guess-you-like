@@ -1,10 +1,10 @@
 {
   "folium": 1,
   "id": "qq-guess-you-like",
-  "name": "QQ音乐电台推荐增强",
-  "version": "1.0.1",
+  "name": "QQ音乐猜你喜欢个性化推荐",
+  "version": "1.0.2",
   "author": "wyatt-liao",
-  "description": "为 QQ 音乐音源接入「随心听」精选电台流，点按直接播放，自动提取首曲专辑高清封面，卸载时完整还原宿主状态。",
+  "description": "为 QQ 音乐音源接入「猜你喜欢」个性推荐流。支持读取已登录账号凭据直连腾讯官方接口拉取专属私人推荐，未登录自动降级为随心听；自动提取首曲专辑高清封面，卸载时完整还原宿主状态。",
   "client": "client.mjs",
   "preview": "preview.jpg",
   "permissions": ["net.fetch"],

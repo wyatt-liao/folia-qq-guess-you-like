@@ -1,14 +1,16 @@
 // mods/qq-guess-you-like/client.mjs
 /**
- * QQ 音乐电台与随心听增强模组 (QQ Music Radio & Stream Mod)
+ * QQ 音乐个性化「猜你喜欢」与电台推荐模组 (QQ Music Guess-You-Like & Radio Mod)
  *
  * 作用：
- * 基于 Folium internals 为 QQ 音乐音源接入「随心听」公共电台流。
+ * 基于 Folium internals 为 QQ 音乐音源接入真正的「猜你喜欢」个性化推荐流。
+ * 自动提取本地已登录账号凭证（Cookie）请求官方个性化电台，未登录时平滑降级至公共随心听电台流。
  * 点按直接播放，自动提取首曲专辑高清封面，卸载时完整还原宿主内部状态。
  *
  * 内部状态修改说明：
- * - 劫持函数：omni.getPersonalFm（在 providerId === 'qq' 时返回精选电台曲目）
+ * - 劫持函数：omni.getPersonalFm（在 providerId === 'qq' 时拉取电台 99 猜你喜欢个性化流）
  * - 修改能力：omni.getProviderCapabilities('qq').recommendations 置为 true
+ * - 凭据使用：读取宿主本地保存的 QQ 音乐 Cookie 仅用于向腾讯官方接口鉴权，绝不上传任何外部服务器
  * - 卸载行为：恢复 omni.getPersonalFm 为原始引用，还原 capabilities.recommendations 为原值
  */
 
@@ -64,25 +66,46 @@ function normalizeTrackToUnifiedSong(raw) {
 export default function (folium) {
   const { omni } = folium.internals || {};
   if (!omni) {
-    console.warn('[qq-radio-mod] folium.internals.omni 不可用，模组未能加载');
+    console.warn('[qq-radio-mod] folium.internals.omni 不可用');
     return;
   }
 
-  // 1. 记录并修补 QQ 音乐能力标记
+  // 1. 临时开启 QQ 音源 recommendations 能力标记，并记录原值
   const caps = omni.getProviderCapabilities?.('qq');
   const originalCapsRecommendations = caps ? caps.recommendations : false;
   if (caps) {
     caps.recommendations = true;
   }
 
-  // 2. 拉取 QQ 音乐官方公开电台曲目（通过主进程 folium.net.fetch）
-  async function fetchRadioTracks(radioId = 101, num = 15) {
+  // 2. 读取本地存储的 QQ 音乐登录 Cookie
+  function getQqCookie() {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        return (
+          localStorage.getItem('online_provider:qq:cookie') ||
+          localStorage.getItem('online_provider_qq_cookie') ||
+          localStorage.getItem('qq_cookie') ||
+          ''
+        );
+      }
+    } catch {
+      return '';
+    }
+    return '';
+  }
+
+  // 3. 拉取电台曲目（电台 99 为猜你喜欢，带鉴权拉取专属个性化流）
+  async function fetchRadioTracks(radioId = 99, count = 15) {
     const payload = {
       comm: { ct: 24, cv: 0 },
       songlist: {
         module: 'mb_track_radio_svr',
         method: 'get_radio_track',
-        param: { id: radioId, firstplay: 1, num: Math.min(20, Math.max(1, num)) },
+        param: {
+          id: radioId,
+          firstplay: 1,
+          num: Math.min(15, count),
+        },
       },
     };
 
@@ -92,13 +115,20 @@ export default function (folium) {
       return [];
     }
 
+    const cookie = getQqCookie();
+    const headers = {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      ...(cookie ? {
+        'Cookie': cookie,
+        'X-Proxy-Cookie': cookie,
+      } : {}),
+    };
+
     try {
       const res = await folium.net.fetch(targetUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        },
+        headers,
         body: JSON.stringify(payload),
       });
       const data = await res.json();
@@ -112,14 +142,18 @@ export default function (folium) {
     return [];
   }
 
-  // 3. 记录并劫持 omni.getPersonalFm
+  // 4. 记录并劫持 omni.getPersonalFm
   const originalGetPersonalFm = omni.getPersonalFm ? omni.getPersonalFm.bind(omni) : null;
   omni.getPersonalFm = async function (options) {
     const summary = omni.getActiveProviderSummary?.();
     if (summary?.providerId === 'qq') {
       try {
-        // 优先拉取随心听电台 (101)，若无返回则降级到热歌电台 (199)
-        let songs = await fetchRadioTracks(101, 15);
+        // 核心：优先拉取电台 99（猜你喜欢），带登录态即为 100% 真实个性化推荐
+        let songs = await fetchRadioTracks(99, 15);
+        // 若未登录或返回为空，平滑降级到 101（随心听）或 199（热歌）
+        if (!songs || songs.length === 0) {
+          songs = await fetchRadioTracks(101, 15);
+        }
         if (!songs || songs.length === 0) {
           songs = await fetchRadioTracks(199, 15);
         }
@@ -133,9 +167,9 @@ export default function (folium) {
     return originalGetPersonalFm ? originalGetPersonalFm(options) : [];
   };
 
-  console.info('[qq-radio-mod] QQ 音乐电台推荐增强模组已激活');
+  console.info('[qq-radio-mod] QQ 音乐个性化「猜你喜欢」电台推荐模组已激活');
 
-  // 4. 卸载钩子：严谨还原所有内部状态
+  // 5. 卸载钩子：严谨还原所有内部状态
   return () => {
     if (originalGetPersonalFm) {
       omni.getPersonalFm = originalGetPersonalFm;
@@ -143,6 +177,6 @@ export default function (folium) {
     if (caps) {
       caps.recommendations = originalCapsRecommendations;
     }
-    console.info('[qq-radio-mod] QQ 音乐电台推荐增强模组已完整卸载并还原');
+    console.info('[qq-radio-mod] QQ 音乐个性化「猜你喜欢」模组已完整卸载并还原');
   };
 }
