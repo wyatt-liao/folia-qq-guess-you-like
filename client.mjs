@@ -1,14 +1,15 @@
 // mods/qq-guess-you-like/client.mjs
 /**
- * QQ 音乐个性化「猜你喜欢」与精选雷达电台矩阵模组 (全功能旗舰版)
+ * QQ 音乐精选雷达电台与随心听增强模组 (QQ Music Radar & Stream Mod)
  *
- * 核心特性：
- * 1. 【真实个性化推荐】：自动读取本地 QQ 音乐已登录账号 Cookie，直通腾讯官方个性化算法网关（电台 99），未登录自动平滑回退；
- * 2. 【首曲封面自动提取】：为“猜你喜欢”精准提取第 1 首曲目高清专辑大图（personalFmCoverUrl），告别默认空白；
- * 3. 【精选雷达电台矩阵】：注入 QQ 音乐 11 款热门雷达电台频道（随心听、热歌、流行、治愈、经典情歌等），带独立专属封面；
- * 4. 【电台卡片完整可打开】：接管 getPlaylistTracks / getCollectionTracks，电台卡片点入即可直接拉取并播放曲目；
- * 5. 【曲目契约严谨对齐】：符合宿主 normalizeQqSong 规约（数字 songId、完整 providerData）；
- * 6. 【纯净卸载】：完整还原 omni 劫持函数与 capabilities 能力标记。
+ * 功能说明：
+ * 基于 Folium internals 为 QQ 音乐音源接入「随心听」与 11 款精选热门雷达电台矩阵。
+ * 1. 接入随心听公共电台流（电台 101，自动降级至 199），第一首歌高清封面由宿主自动提取展示；
+ * 2. 注入 11 款热门雷达电台网格，采用静态高清专辑封面，零额外首屏网络请求；
+ * 3. 通过 omni.getCollectionTracks 接管电台点击，点入直接拉取并播放 30 首电台曲目；
+ * 4. 严谨对齐宿主 normalizeQqSong 规约（数字 songId、完整 providerData、无多余 fallback）；
+ * 5. 安全合规：纯匿名请求腾讯公开接口，不读取或发送任何用户凭证，不执行远程代码；
+ * 6. 纯净卸载：完整还原所有被替换的内部函数与能力标记。
  */
 
 const QQ_RADIO_STATIONS = [
@@ -38,7 +39,8 @@ function normalizeTrackToUnifiedSong(raw) {
   const songId = Number.isFinite(numericSongId) && numericSongId > 0 ? numericSongId : songMid;
 
   const albumMid = String(raw.album?.mid || raw.albummid || '').trim();
-  const mediaMid = String(raw.file?.media_mid || raw.media_mid || songMid).trim();
+  // 严格对齐宿主 normalizeQqSong：没有 mediaMid 时保持空字符串，不回退到 songMid
+  const mediaMid = String(raw.file?.media_mid || raw.media_mid || '').trim();
   const coverUrl = getAlbumCoverUrl(albumMid);
 
   const singers = Array.isArray(raw.singer) ? raw.singer : Array.isArray(raw.singers) ? raw.singers : [];
@@ -81,34 +83,15 @@ export default function (folium) {
     return;
   }
 
-  // 1. 开启 QQ 音源 recommendations 能力标记
+  // 1. 开启 QQ 音源 recommendations 能力标记，并记录原值
   const caps = omni.getProviderCapabilities?.('qq');
   const originalCapsRecommendations = caps ? caps.recommendations : false;
   if (caps) {
     caps.recommendations = true;
   }
 
-  // 2. 读取本地存储中属于 QQ 音乐的鉴权 Cookie
-  function getQqCookie() {
-    try {
-      if (typeof localStorage !== 'undefined') {
-        return (
-          localStorage.getItem('online_provider:qq:cookie') ||
-          localStorage.getItem('online_provider_qq_cookie') ||
-          localStorage.getItem('qq_cookie') ||
-          ''
-        );
-      }
-    } catch {
-      return '';
-    }
-    return '';
-  }
-
-  const stationCoverCache = new Map();
-
-  // 3. 拉取电台曲目（电台 99 为猜你喜欢，带登录 Cookie 即为真实个性化推荐）
-  async function fetchRadioTracks(radioId = 99, count = 15) {
+  // 2. 匿名请求公开电台曲目（通过主进程 folium.net.fetch，杜绝凭证泄漏）
+  async function fetchRadioTracks(radioId = 101, count = 15) {
     const payload = {
       comm: { ct: 24, cv: 0 },
       songlist: {
@@ -128,20 +111,13 @@ export default function (folium) {
       return [];
     }
 
-    const cookie = getQqCookie();
-    const headers = {
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      ...(cookie ? {
-        'Cookie': cookie,
-        'X-Proxy-Cookie': cookie,
-      } : {}),
-    };
-
     try {
       const res = await folium.net.fetch(targetUrl, {
         method: 'POST',
-        headers,
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
         body: JSON.stringify(payload),
       });
       const data = await res.json();
@@ -155,31 +131,13 @@ export default function (folium) {
     return [];
   }
 
-  async function getStationCover(station) {
-    if (stationCoverCache.has(station.id)) return stationCoverCache.get(station.id);
-    try {
-      const songs = await fetchRadioTracks(station.id, 1);
-      const cover = songs?.[0]?.album?.coverUrl;
-      if (cover) {
-        stationCoverCache.set(station.id, cover);
-        return cover;
-      }
-    } catch {}
-    const fallback = getAlbumCoverUrl(station.fallbackMid);
-    stationCoverCache.set(station.id, fallback);
-    return fallback;
-  }
-
-  // 4. 劫持 omni.getPersonalFm（优先电台 99 猜你喜欢，未登录平滑降级）
+  // 3. 劫持 omni.getPersonalFm（优先拉取随心听 101，若空则回退至热歌 199）
   const originalGetPersonalFm = omni.getPersonalFm ? omni.getPersonalFm.bind(omni) : null;
   omni.getPersonalFm = async function (options) {
     const summary = omni.getActiveProviderSummary?.();
     if (summary?.providerId === 'qq') {
       try {
-        let songs = await fetchRadioTracks(99, 15);
-        if (!songs || songs.length === 0) {
-          songs = await fetchRadioTracks(101, 15);
-        }
+        let songs = await fetchRadioTracks(101, 15);
         if (!songs || songs.length === 0) {
           songs = await fetchRadioTracks(199, 15);
         }
@@ -193,58 +151,37 @@ export default function (folium) {
     return originalGetPersonalFm ? originalGetPersonalFm(options) : [];
   };
 
-  // 5. 劫持 omni.getDailySongs
-  const originalGetDailySongs = omni.getDailySongs ? omni.getDailySongs.bind(omni) : null;
-  if (originalGetDailySongs) {
-    omni.getDailySongs = async function (refresh) {
-      const summary = omni.getActiveProviderSummary?.();
-      if (summary?.providerId === 'qq') {
-        try {
-          const songs = await fetchRadioTracks(99, 30);
-          if (songs && songs.length > 0) return songs;
-        } catch (err) {
-          console.warn('[qq-radio-mod] getDailySongs failed, fallback', err);
-        }
-      }
-      return originalGetDailySongs(refresh);
-    };
-  }
-
-  // 6. 劫持 omni.getHomeFeed：注入猜你喜欢封面 (personalFmCoverUrl) 与 11 款精选电台网格
+  // 4. 劫持 omni.getHomeFeed：为电台页注入随心听曲目与 11 款雷达电台网格
   const originalGetHomeFeed = omni.getHomeFeed ? omni.getHomeFeed.bind(omni) : null;
   if (originalGetHomeFeed) {
     omni.getHomeFeed = async function (limit = 35) {
       const summary = omni.getActiveProviderSummary?.();
       if (summary?.providerId === 'qq') {
         try {
-          let personalFm = await fetchRadioTracks(99, 15);
+          // 只请求一次随心听（宿主自动取第 1 首封面渲染展示），无多余冗余请求
+          let personalFm = await fetchRadioTracks(101, 15);
           if (!personalFm || personalFm.length === 0) {
-            personalFm = await fetchRadioTracks(101, 15);
+            personalFm = await fetchRadioTracks(199, 15);
           }
-          const dailySongs = await fetchRadioTracks(101, 20);
-          const personalFmCoverUrl = personalFm?.[0]?.album?.coverUrl || '';
 
-          const radioCollections = await Promise.all(
-            QQ_RADIO_STATIONS.slice(0, limit).map(async (st) => ({
-              providerId: 'qq',
-              id: `radio:${st.id}`,
-              name: st.name,
-              coverUrl: await getStationCover(st),
-              trackCount: 30,
-              type: 'radio',
-              description: st.description,
-              creator: { nickname: 'QQ音乐电台' },
-              providerData: {
-                stationId: st.id,
-                isRadio: true,
-              },
-            }))
-          );
+          // 电台网格采用静态高质量封面，零额外网络请求，秒级渲染
+          const radioCollections = QQ_RADIO_STATIONS.slice(0, limit).map((st) => ({
+            providerId: 'qq',
+            id: `radio:${st.id}`,
+            name: st.name,
+            coverUrl: getAlbumCoverUrl(st.fallbackMid),
+            trackCount: 30,
+            type: 'radio',
+            description: st.description,
+            creator: { nickname: 'QQ音乐电台' },
+            providerData: {
+              stationId: st.id,
+              isRadio: true,
+            },
+          }));
 
           return {
             personalFm,
-            personalFmCoverUrl,
-            dailySongs,
             recommendedCollections: radioCollections,
           };
         } catch (err) {
@@ -255,25 +192,7 @@ export default function (folium) {
     };
   }
 
-  // 7. 接管电台歌单/集合点击：解决电台打不开的问题
-  const originalGetPlaylistTracks = omni.getPlaylistTracks ? omni.getPlaylistTracks.bind(omni) : null;
-  if (originalGetPlaylistTracks) {
-    omni.getPlaylistTracks = async function (collectionId, options) {
-      const idStr = String(typeof collectionId === 'object' ? collectionId?.id : collectionId);
-      if (idStr.startsWith('radio:')) {
-        const stationId = Number(idStr.replace(/^radio:/, '')) || 101;
-        const tracks = await fetchRadioTracks(stationId, 30);
-        return {
-          items: tracks,
-          total: Math.max(tracks.length, 30),
-          hasMore: false,
-          nextOffset: tracks.length,
-        };
-      }
-      return originalGetPlaylistTracks(collectionId, options);
-    };
-  }
-
+  // 5. 接管电台歌单/集合点击（omni.getCollectionTracks），实现电台点入即播
   const originalGetCollectionTracks = omni.getCollectionTracks ? omni.getCollectionTracks.bind(omni) : null;
   if (originalGetCollectionTracks) {
     omni.getCollectionTracks = async function (collection, options) {
@@ -292,16 +211,14 @@ export default function (folium) {
     };
   }
 
-  console.info('[qq-radio-mod] QQ 音乐个性化「猜你喜欢」与雷达电台矩阵全功能已激活！');
+  console.info('[qq-radio-mod] QQ 音乐随心听与雷达电台矩阵模组已激活！');
 
-  // 8. 纯净卸载钩子
+  // 6. 纯净卸载钩子：100% 还原所有内部引用与能力标记
   return () => {
     if (originalGetPersonalFm) omni.getPersonalFm = originalGetPersonalFm;
-    if (originalGetDailySongs) omni.getDailySongs = originalGetDailySongs;
     if (originalGetHomeFeed) omni.getHomeFeed = originalGetHomeFeed;
-    if (originalGetPlaylistTracks) omni.getPlaylistTracks = originalGetPlaylistTracks;
     if (originalGetCollectionTracks) omni.getCollectionTracks = originalGetCollectionTracks;
     if (caps) caps.recommendations = originalCapsRecommendations;
-    console.info('[qq-radio-mod] QQ 音乐个性化推荐与雷达电台模组已完整卸载并还原');
+    console.info('[qq-radio-mod] QQ 音乐电台模组已完整卸载并还原');
   };
 }
